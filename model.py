@@ -161,7 +161,7 @@ class ActionModel(nn.Module):
         self.min_stddev = min_stddev
         self.init_stddev = np.log(np.exp(init_stddev) - 1)
 
-    def forward(self, state, rnn_hidden):
+    def forward(self, state, rnn_hidden, training=True):
         hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=1)))
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
@@ -172,5 +172,8 @@ class ActionModel(nn.Module):
         stddev = self.fc_stddev(hidden)
         stddev = F.softplus(stddev + self.init_stddev) + self.min_stddev
 
-        action = torch.tanh(Normal(mean, stddev).rsample())
+        if training:
+            action = torch.tanh(Normal(mean, stddev).rsample())
+        else:
+            action = torch.tanh(mean)
         return action

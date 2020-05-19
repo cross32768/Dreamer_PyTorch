@@ -13,19 +13,20 @@ from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from dm_control import suite
 from dm_control.suite.wrappers import pixels
-from agent import CEMAgent
-from model import Encoder, RecurrentStateSpaceModel, ObservationModel, RewardModel
+from agent import Agent
+from model import (Encoder, RecurrentStateSpaceModel, ObservationModel, RewardModel,
+                   ValueModel, ActionModel)
 from utils import ReplayBuffer, preprocess_obs
 from wrappers import GymWrapper, RepeatAction
 
 
 def main():
-    parser = argparse.ArgumentParser(description='PlaNet for DM control')
+    parser = argparse.ArgumentParser(description='Dreamer for DM control')
     parser.add_argument('--log-dir', type=str, default='log')
     parser.add_argument('--test-interval', type=int, default=10)
     parser.add_argument('--domain-name', type=str, default='cheetah')
     parser.add_argument('--task-name', type=str, default='run')
-    parser.add_argument('-R', '--action-repeat', type=int, default=4)
+    parser.add_argument('-R', '--action-repeat', type=int, default=2)
     parser.add_argument('--state-dim', type=int, default=30)
     parser.add_argument('--rnn-hidden-dim', type=int, default=200)
     parser.add_argument('--buffer-capacity', type=int, default=1000000)
@@ -34,14 +35,13 @@ def main():
     parser.add_argument('-C', '--collect-interval', type=int, default=100)
     parser.add_argument('-B', '--batch-size', type=int, default=50)
     parser.add_argument('-L', '--chunk-length', type=int, default=50)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('-H', '--imagination-horizon', type=int, default=15)
+    parser.add_argument('--model_lr', type=float, default=6e-4)
+    parser.add_argument('--value_lr', type=float, default=8e-5)
+    parser.add_argument('--action_lr', type=float, default=8e-5)
     parser.add_argument('--eps', type=float, default=1e-4)
-    parser.add_argument('--clip-grad-norm', type=int, default=1000)
+    parser.add_argument('--clip-grad-norm', type=int, default=100)
     parser.add_argument('--free-nats', type=int, default=3)
-    parser.add_argument('-H', '--horizon', type=int, default=12)
-    parser.add_argument('-I', '--N-iterations', type=int, default=10)
-    parser.add_argument('-J', '--N-candidates', type=int, default=1000)
-    parser.add_argument('-K', '--N-top-candidates', type=int, default=100)
     parser.add_argument('--action-noise-var', type=float, default=0.3)
     args = parser.parse_args()
 
@@ -75,20 +75,29 @@ def main():
                                     args.rnn_hidden_dim).to(device)
     obs_model = ObservationModel(args.state_dim, args.rnn_hidden_dim).to(device)
     reward_model = RewardModel(args.state_dim, args.rnn_hidden_dim).to(device)
-    all_params = (list(encoder.parameters()) +
-                  list(rssm.parameters()) +
-                  list(obs_model.parameters()) +
-                  list(reward_model.parameters()))
-    optimizer = Adam(all_params, lr=args.lr, eps=args.eps)
+    model_params = (list(encoder.parameters()) +
+                    list(rssm.parameters()) +
+                    list(obs_model.parameters()) +
+                    list(reward_model.parameters()))
+    model_optimizer = Adam(model_params, lr=args.model_lr, eps=args.eps)
+
+    # define value model and action model and optimizer
+    action_model = ActionModel(args.state_dim, args.rnn_hidden_dim,
+                               env.action_space.shape[0]).to(device)
+    # value_model = ValueModel(args.state_dim, args.rnn_hidden_dim).to(device)
+    action_optimizer = Adam(action_model.parameters(),
+                            lr=args.action_lr, eps=args.eps)
+    # value_optimizer = Adam(value_model.parameters(),
+    #                       lr=args.value_lr, eps=args.eps)
 
     # main training loop
     for episode in range(args.all_episodes):
         # collect experiences
         start = time.time()
+
         if episode >= args.seed_episodes:
-            cem_agent = CEMAgent(encoder, rssm, reward_model,
-                                 args.horizon, args.N_iterations,
-                                 args.N_candidates, args.N_top_candidates)
+            policy = Agent(encoder, rssm, action_model)
+
         obs = env.reset()
         done = False
         total_reward = 0
@@ -96,7 +105,7 @@ def main():
             if episode < args.seed_episodes:
                 action = env.action_space.sample()
             else:
-                action = cem_agent(obs)
+                action = policy(obs)
                 action += np.random.normal(0, np.sqrt(args.action_noise_var),
                                            env.action_space.shape[0])
             next_obs, reward, done, _ = env.step(action)
@@ -109,7 +118,7 @@ def main():
               (episode+1, args.all_episodes, total_reward))
         print('elasped time for interaction: %.2fs' % (time.time() - start))
 
-        # update model parameters
+        # update model parameters and value model and action model parameters
         start = time.time()
         for update_step in range(args.collect_interval):
             observations, actions, rewards, _ = \
@@ -149,49 +158,73 @@ def main():
                 kl_loss += kl.clamp(min=args.free_nats).mean()
             kl_loss /= (args.chunk_length - 1)
 
+            # states[0] and rnn_hiddens[0] are always 0 and have no information
+            states = states[1:]
+            rnn_hiddens = rnn_hiddens[1:]
+
             # compute reconstructed observations and predicted rewards
             flatten_states = states.view(-1, args.state_dim)
             flatten_rnn_hiddens = rnn_hiddens.view(-1, args.rnn_hidden_dim)
             recon_observations = obs_model(flatten_states, flatten_rnn_hiddens).view(
-                args.chunk_length, args.batch_size, 3, 64, 64)
+                args.chunk_length-1, args.batch_size, 3, 64, 64)
             predicted_rewards = reward_model(flatten_states, flatten_rnn_hiddens).view(
-                args.chunk_length, args.batch_size, 1)
+                args.chunk_length-1, args.batch_size, 1)
 
             # compute loss for observation and reward
             obs_loss = mse_loss(
-                recon_observations[1:], observations[1:], reduction='none').mean([0, 1]).sum()
-            reward_loss = mse_loss(predicted_rewards[1:], rewards[:-1])
+                recon_observations, observations[1:], reduction='none').mean([0, 1]).sum()
+            reward_loss = mse_loss(predicted_rewards, rewards[:-1])
 
             # add all losses and update model parameters with gradient descent
-            loss = kl_loss + obs_loss + reward_loss
-            optimizer.zero_grad()
-            loss.backward()
-            clip_grad_norm_(all_params, args.clip_grad_norm)
-            optimizer.step()
+            model_loss = kl_loss + obs_loss + reward_loss
+            model_optimizer.zero_grad()
+            model_loss.backward(retain_graph=True)
+            clip_grad_norm_(model_params, args.clip_grad_norm)
+            model_optimizer.step()
+
+            # compute target values
+            imaginated_values = torch.zeros(args.imagination_horizon + 1,
+                                            flatten_states.size(0), device=device)
+            imaginated_values += reward_model(flatten_states,
+                                              flatten_rnn_hiddens).squeeze()
+            for h in range(1, args.imagination_horizon+1):
+                actions = action_model(flatten_states, flatten_rnn_hiddens)
+                flatten_states_prior, flatten_rnn_hiddens = rssm.prior(flatten_states,
+                                                                       actions,
+                                                                       flatten_rnn_hiddens)
+                flatten_states = flatten_states_prior.rsample()
+                imaginated_values[h:] += reward_model(flatten_states,
+                                                      flatten_rnn_hiddens).squeeze()            
+
+            # update value model and action model
+            action_loss = -1 * (imaginated_values.mean())
+            action_optimizer.zero_grad()
+            action_loss.backward()
+            clip_grad_norm_(action_model.parameters(), args.clip_grad_norm)
+            action_optimizer.step()
 
             # print losses and add tensorboard
-            print('update_step: %3d loss: %.5f, kl_loss: %.5f, obs_loss: %.5f, reward_loss: % .5f'
+            print('update_step: %3d loss: %.5f, kl_loss: %.5f, obs_loss: %.5f, reward_loss: % .5f, action_loss: %.5f'
                   % (update_step+1,
-                     loss.item(), kl_loss.item(), obs_loss.item(), reward_loss.item()))
+                     model_loss.item(), kl_loss.item(), obs_loss.item(), reward_loss.item(), action_loss.item()))
             total_update_step = episode * args.collect_interval + update_step
-            writer.add_scalar('overall loss', loss.item(), total_update_step)
+            writer.add_scalar('overall loss', model_loss.item(), total_update_step)
             writer.add_scalar('kl loss', kl_loss.item(), total_update_step)
             writer.add_scalar('obs loss', obs_loss.item(), total_update_step)
             writer.add_scalar('reward loss', reward_loss.item(), total_update_step)
+            writer.add_scalar('action loss', action_loss.item(), total_update_step)
 
         print('elasped time for update: %.2fs' % (time.time() - start))
 
         # test to get score without exploration noise
         if (episode + 1) % args.test_interval == 0:
+            policy = Agent(encoder, rssm, action_model)
             start = time.time()
-            cem_agent = CEMAgent(encoder, rssm, reward_model,
-                                 args.horizon, args.N_iterations,
-                                 args.N_candidates, args.N_top_candidates)
             obs = env.reset()
             done = False
             total_reward = 0
             while not done:
-                action = cem_agent(obs)
+                action = policy(obs, training=False)
                 obs, reward, done, _ = env.step(action)
                 total_reward += reward
 
@@ -205,6 +238,8 @@ def main():
     torch.save(rssm.state_dict(), os.path.join(log_dir, 'rssm.pth'))
     torch.save(obs_model.state_dict(), os.path.join(log_dir, 'obs_model.pth'))
     torch.save(reward_model.state_dict(), os.path.join(log_dir, 'reward_model.pth'))
+    torch.save(action_model.state_dict(), os.path.join(log_dir, 'action_model.pth'))
+    # torch.save(value_model.state_dict(), os.path.join(log_dir, 'value_model.pth'))
     writer.close()
 
 if __name__ == '__main__':
