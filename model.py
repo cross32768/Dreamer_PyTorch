@@ -157,6 +157,7 @@ class ActionModel(nn.Module):
         self.fc4 = nn.Linear(hidden_dim, hidden_dim)
         self.fc_mean = nn.Linear(hidden_dim, action_dim)
         self.fc_stddev = nn.Linear(hidden_dim, action_dim)
+        self.act= act
         self.min_stddev = min_stddev
         self.init_stddev = np.log(np.exp(init_stddev) - 1)
 
@@ -171,5 +172,5 @@ class ActionModel(nn.Module):
         stddev = self.fc_stddev(hidden)
         stddev = F.softplus(stddev + self.init_stddev) + self.min_stddev
 
-        action = F.tanh(Normal(mean, stddev).rsample())
+        action = torch.tanh(Normal(mean, stddev).rsample())
         return action
