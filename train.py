@@ -22,6 +22,7 @@ from wrappers import GymWrapper, RepeatAction
 
 def main():
     parser = argparse.ArgumentParser(description='Dreamer for DM control')
+    parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--log-dir', type=str, default='log')
     parser.add_argument('--test-interval', type=int, default=10)
     parser.add_argument('--domain-name', type=str, default='cheetah')
@@ -56,8 +57,14 @@ def main():
     pprint(vars(args))
     writer = SummaryWriter(log_dir=log_dir)
 
+    # set seed (NOTE: some randomness is still remaining (e.g. cuDNN's randomness))
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+
     # define env and apply wrappers
-    env = suite.load(args.domain_name, args.task_name)
+    env = suite.load(args.domain_name, args.task_name, task_kwargs={'random': args.seed})
     env = pixels.Wrapper(env, render_kwargs={'height': 64,
                                              'width': 64,
                                              'camera_id': 0})
