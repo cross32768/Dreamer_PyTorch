@@ -1,0 +1,7 @@
+dm_control
+gym
+opencv-python
+matplotlib
+numpy
+tensorboard
+torch
