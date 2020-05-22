@@ -16,7 +16,7 @@ from dm_control.suite.wrappers import pixels
 from agent import Agent
 from model import (Encoder, RecurrentStateSpaceModel, ObservationModel, RewardModel,
                    ValueModel, ActionModel)
-from utils import ReplayBuffer, preprocess_obs
+from utils import ReplayBuffer, preprocess_obs, lambda_return
 from wrappers import GymWrapper, RepeatAction
 
 
@@ -36,6 +36,8 @@ def main():
     parser.add_argument('-B', '--batch-size', type=int, default=50)
     parser.add_argument('-L', '--chunk-length', type=int, default=50)
     parser.add_argument('-H', '--imagination-horizon', type=int, default=15)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--lambda_', type=float, default=0.95)
     parser.add_argument('--model_lr', type=float, default=6e-4)
     parser.add_argument('--value_lr', type=float, default=8e-5)
     parser.add_argument('--action_lr', type=float, default=8e-5)
@@ -82,13 +84,13 @@ def main():
     model_optimizer = Adam(model_params, lr=args.model_lr, eps=args.eps)
 
     # define value model and action model and optimizer
+    value_model = ValueModel(args.state_dim, args.rnn_hidden_dim).to(device)
     action_model = ActionModel(args.state_dim, args.rnn_hidden_dim,
                                env.action_space.shape[0]).to(device)
-    # value_model = ValueModel(args.state_dim, args.rnn_hidden_dim).to(device)
+    value_optimizer = Adam(value_model.parameters(),
+                           lr=args.value_lr, eps=args.eps)
     action_optimizer = Adam(action_model.parameters(),
                             lr=args.action_lr, eps=args.eps)
-    # value_optimizer = Adam(value_model.parameters(),
-    #                       lr=args.value_lr, eps=args.eps)
 
     # main training loop
     for episode in range(args.all_episodes):
@@ -183,36 +185,60 @@ def main():
             model_optimizer.step()
 
             # compute target values
-            imaginated_values = torch.zeros(args.imagination_horizon + 1,
-                                            flatten_states.size(0), device=device)
-            imaginated_values += reward_model(flatten_states,
-                                              flatten_rnn_hiddens).squeeze()
-            for h in range(1, args.imagination_horizon+1):
+            imaginated_states = torch.zeros(args.imagination_horizon + 1,
+                                            *flatten_states.shape,
+                                            device=flatten_states.device)
+            imaginated_rnn_hiddens = torch.zeros(args.imagination_horizon + 1,
+                                                 *flatten_rnn_hiddens.shape,
+                                                 device=flatten_rnn_hiddens.device)
+            imaginated_states[0] = flatten_states
+            imaginated_rnn_hiddens[0] = flatten_rnn_hiddens
+
+            for h in range(1, args.imagination_horizon + 1):
                 actions = action_model(flatten_states, flatten_rnn_hiddens)
                 flatten_states_prior, flatten_rnn_hiddens = rssm.prior(flatten_states,
                                                                        actions,
                                                                        flatten_rnn_hiddens)
                 flatten_states = flatten_states_prior.rsample()
-                imaginated_values[h:] += reward_model(flatten_states,
-                                                      flatten_rnn_hiddens).squeeze()            
+                imaginated_states[h] = flatten_states
+                imaginated_rnn_hiddens[h] = flatten_rnn_hiddens
+
+            flatten_imaginated_states = imaginated_states.view(-1, args.state_dim)
+            flatten_imaginated_rnn_hiddens = imaginated_rnn_hiddens.view(-1, args.rnn_hidden_dim)
+            imaginated_rewards = \
+                reward_model(flatten_imaginated_states,
+                             flatten_imaginated_rnn_hiddens).view(args.imagination_horizon + 1, -1)
+            imaginated_values = \
+                value_model(flatten_imaginated_states,
+                            flatten_imaginated_rnn_hiddens).view(args.imagination_horizon + 1, -1)
+            lambda_value_target = lambda_return(imaginated_rewards, imaginated_values,
+                                                args.gamma, args.lambda_)
+        
+            # update_value model
+            value_loss = mse_loss(imaginated_values, lambda_value_target.detach())
+            value_optimizer.zero_grad()
+            value_loss.backward(retain_graph=True)
+            clip_grad_norm_(value_model.parameters(), args.clip_grad_norm)
+            value_optimizer.step()
 
             # update value model and action model
-            action_loss = -1 * (imaginated_values.mean())
+            action_loss = -1 * (lambda_value_target.mean())
             action_optimizer.zero_grad()
             action_loss.backward()
             clip_grad_norm_(action_model.parameters(), args.clip_grad_norm)
             action_optimizer.step()
 
             # print losses and add tensorboard
-            print('update_step: %3d loss: %.5f, kl_loss: %.5f, obs_loss: %.5f, reward_loss: % .5f, action_loss: %.5f'
+            print('update_step: %3d model loss: %.5f, kl_loss: %.5f, obs_loss: %.5f, reward_loss: % .5f, action_loss: %.5f value_loss: %.5f'
                   % (update_step+1,
-                     model_loss.item(), kl_loss.item(), obs_loss.item(), reward_loss.item(), action_loss.item()))
+                     model_loss.item(), kl_loss.item(), obs_loss.item(), reward_loss.item(), action_loss.item(), value_loss.item()))
             total_update_step = episode * args.collect_interval + update_step
-            writer.add_scalar('overall loss', model_loss.item(), total_update_step)
+            writer.add_scalar('model loss', model_loss.item(), total_update_step)
             writer.add_scalar('kl loss', kl_loss.item(), total_update_step)
             writer.add_scalar('obs loss', obs_loss.item(), total_update_step)
             writer.add_scalar('reward loss', reward_loss.item(), total_update_step)
             writer.add_scalar('action loss', action_loss.item(), total_update_step)
+            writer.add_scalar('value loss', value_loss.item(), total_update_step)
 
         print('elasped time for update: %.2fs' % (time.time() - start))
 
@@ -239,7 +265,7 @@ def main():
     torch.save(obs_model.state_dict(), os.path.join(log_dir, 'obs_model.pth'))
     torch.save(reward_model.state_dict(), os.path.join(log_dir, 'reward_model.pth'))
     torch.save(action_model.state_dict(), os.path.join(log_dir, 'action_model.pth'))
-    # torch.save(value_model.state_dict(), os.path.join(log_dir, 'value_model.pth'))
+    torch.save(value_model.state_dict(), os.path.join(log_dir, 'value_model.pth'))
     writer.close()
 
 if __name__ == '__main__':
