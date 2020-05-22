@@ -92,24 +92,30 @@ def main():
     action_optimizer = Adam(action_model.parameters(),
                             lr=args.action_lr, eps=args.eps)
 
+    # collect seed episodes with random action
+    for episode in range(args.seed_episodes):
+        obs = env.reset()
+        done = False
+        while not done:
+            action = env.action_space.sample()
+            next_obs, reward, done, _ = env.step(action)
+            replay_buffer.push(obs, action, reward, done)
+            obs = next_obs    
+
     # main training loop
-    for episode in range(args.all_episodes):
+    for episode in range(args.seed_episodes, args.all_episodes):
         # collect experiences
         start = time.time()
 
-        if episode >= args.seed_episodes:
-            policy = Agent(encoder, rssm, action_model)
+        policy = Agent(encoder, rssm, action_model)
 
         obs = env.reset()
         done = False
         total_reward = 0
         while not done:
-            if episode < args.seed_episodes:
-                action = env.action_space.sample()
-            else:
-                action = policy(obs)
-                action += np.random.normal(0, np.sqrt(args.action_noise_var),
-                                           env.action_space.shape[0])
+            action = policy(obs)
+            action += np.random.normal(0, np.sqrt(args.action_noise_var),
+                                        env.action_space.shape[0])
             next_obs, reward, done, _ = env.step(action)
             replay_buffer.push(obs, action, reward, done)
             obs = next_obs
