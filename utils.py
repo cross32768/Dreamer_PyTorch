@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 
 class ReplayBuffer(object):
@@ -73,3 +74,25 @@ def preprocess_obs(obs, bit_depth=5):
     normalized_obs = reduced_obs / 2**bit_depth - 0.5
     normalized_obs += np.random.uniform(0.0, 1.0 / 2**bit_depth, normalized_obs.shape)
     return normalized_obs
+
+
+def lambda_return(rewards, values, gamma, lambda_):
+    V_lambda = torch.zeros_like(rewards, device=rewards.device)
+    
+    H = rewards.shape[0] - 1
+    V_n = torch.zeros_like(rewards, device=rewards.device)
+    V_n[H] = values[H]
+    for n in range(1, H+1):
+        V_n[:-n] = (gamma ** n) * values[n:]
+        for k in range(1, n+1):
+            if k == n:
+                V_n[:-n] += (gamma ** (n-1)) * rewards[k:]
+            else:
+                V_n[:-n] += (gamma ** (k-1)) * rewards[k:-n+k]
+        
+        if n == H:
+            V_lambda += (lambda_ ** (H-1)) * V_n
+        else:
+            V_lambda += (1 - lambda_) * (lambda_ ** (n-1)) * V_n
+
+    return V_lambda
