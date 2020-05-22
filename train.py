@@ -106,7 +106,6 @@ def main():
     for episode in range(args.seed_episodes, args.all_episodes):
         # collect experiences
         start = time.time()
-
         policy = Agent(encoder, rssm, action_model)
 
         obs = env.reset()
@@ -179,18 +178,20 @@ def main():
                 args.chunk_length-1, args.batch_size, 1)
 
             # compute loss for observation and reward
-            obs_loss = mse_loss(
+            obs_loss = 0.5 * mse_loss(
                 recon_observations, observations[1:], reduction='none').mean([0, 1]).sum()
-            reward_loss = mse_loss(predicted_rewards, rewards[:-1])
+            reward_loss = 0.5 * mse_loss(predicted_rewards, rewards[:-1])
 
             # add all losses and update model parameters with gradient descent
             model_loss = kl_loss + obs_loss + reward_loss
             model_optimizer.zero_grad()
-            model_loss.backward(retain_graph=True)
+            model_loss.backward()
             clip_grad_norm_(model_params, args.clip_grad_norm)
             model_optimizer.step()
 
             # compute target values
+            flatten_states = flatten_states.detach()
+            flatten_rnn_hiddens = flatten_rnn_hiddens.detach()
             imaginated_states = torch.zeros(args.imagination_horizon + 1,
                                             *flatten_states.shape,
                                             device=flatten_states.device)
@@ -221,7 +222,7 @@ def main():
                                                 args.gamma, args.lambda_)
         
             # update_value model
-            value_loss = mse_loss(imaginated_values, lambda_value_target.detach())
+            value_loss = 0.5 * mse_loss(imaginated_values, lambda_value_target.detach())
             value_optimizer.zero_grad()
             value_loss.backward(retain_graph=True)
             clip_grad_norm_(value_model.parameters(), args.clip_grad_norm)
