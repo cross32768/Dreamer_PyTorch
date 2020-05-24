@@ -27,6 +27,9 @@ class Agent:
                                                  action,
                                                  self.rnn_hidden)
         return action.squeeze().cpu().numpy()
+    
+    def reset(self):
+        self.rnn_hidden = torch.zeros(1, self.rssm.rnn_hidden_dim, device=self.device)
 
 
 class CEMAgent:
