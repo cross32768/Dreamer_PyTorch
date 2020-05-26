@@ -72,7 +72,7 @@ def preprocess_obs(obs):
     return normalized_obs
 
 
-def lambda_return(rewards, values, gamma, lambda_):
+def lambda_target(rewards, values, gamma, lambda_):
     """
     Compute lambda target of value function
     rewards and values should be 2D-tensor and same size,
@@ -101,3 +101,11 @@ def lambda_return(rewards, values, gamma, lambda_):
             V_lambda += (1 - lambda_) * (lambda_ ** (n-1)) * V_n
 
     return V_lambda
+
+
+def get_env(env_name, seed):
+    domain_name, task_name = env_name.split('_')
+    env = suite.load(domain_name, task_name, task_kwargs={'random': args.seed})
+    env = pixels.Wrapper(env, render_kwargs={'height': 64, 'width': 64, 'camera_id': 0})
+    env = GymWrapper(env)
+    return env
