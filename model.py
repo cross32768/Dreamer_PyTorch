@@ -131,6 +131,10 @@ class RewardModel(nn.Module):
 
 
 class ValueModel(nn.Module):
+    """
+    Value model to predict state-value of current policy (action_model)
+    from state and rnn_hidden
+    """
     def __init__(self, state_dim, rnn_hidden_dim, hidden_dim=400, act=F.elu):
         super(ValueModel, self).__init__()
         self.fc1 = nn.Linear(state_dim + rnn_hidden_dim, hidden_dim)
@@ -148,6 +152,9 @@ class ValueModel(nn.Module):
 
 
 class ActionModel(nn.Module):
+    """
+    Action model to compute action from state and rnn_hidden
+    """
     def __init__(self, state_dim, rnn_hidden_dim, action_dim,
                  hidden_dim=400, act=F.elu, min_stddev=1e-4, init_stddev=5.0):
         super(ActionModel, self).__init__()
@@ -157,18 +164,27 @@ class ActionModel(nn.Module):
         self.fc4 = nn.Linear(hidden_dim, hidden_dim)
         self.fc_mean = nn.Linear(hidden_dim, action_dim)
         self.fc_stddev = nn.Linear(hidden_dim, action_dim)
-        self.act= act
+        self.act = act
         self.min_stddev = min_stddev
         self.init_stddev = np.log(np.exp(init_stddev) - 1)
 
     def forward(self, state, rnn_hidden, training=True):
+        """
+        if training=True, returned action is reparametrized sample
+        if training=False, returned action is mean of action distribution
+        """
         hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=1)))
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         hidden = self.act(self.fc4(hidden))
 
+        # action-mean is divided by 5.0 and applied tanh
+        # and multiplied by 5.0 same as Dreamer's paper
         mean = self.fc_mean(hidden)
         mean = 5.0 * torch.tanh(mean / 5.0)
+
+        # stddev is computed with some hyperparameter
+        # (init_stddev, min_stddev) same as original implementation
         stddev = self.fc_stddev(hidden)
         stddev = F.softplus(stddev + self.init_stddev) + self.min_stddev
 

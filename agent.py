@@ -17,7 +17,7 @@ class Agent:
 
     def __call__(self, obs, training=True):
         """
-        if training == False, returned action is mean
+        if training=False, returned action is mean
         instead of sample from action_model's distribution
         """
         # preprocess observation and transpose for torch style (channel-first)
