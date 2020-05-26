@@ -16,7 +16,7 @@ from dm_control.suite.wrappers import pixels
 from agent import Agent
 from model import (Encoder, RecurrentStateSpaceModel, ObservationModel, RewardModel,
                    ValueModel, ActionModel)
-from utils import ReplayBuffer, preprocess_obs, lambda_return
+from utils import ReplayBuffer, preprocess_obs, lambda_target
 from wrappers import GymWrapper, RepeatAction
 
 
@@ -94,10 +94,8 @@ def main():
     value_model = ValueModel(args.state_dim, args.rnn_hidden_dim).to(device)
     action_model = ActionModel(args.state_dim, args.rnn_hidden_dim,
                                env.action_space.shape[0]).to(device)
-    value_optimizer = Adam(value_model.parameters(),
-                           lr=args.value_lr, eps=args.eps)
-    action_optimizer = Adam(action_model.parameters(),
-                            lr=args.action_lr, eps=args.eps)
+    value_optimizer = Adam(value_model.parameters(), lr=args.value_lr, eps=args.eps)
+    action_optimizer = Adam(action_model.parameters(), lr=args.action_lr, eps=args.eps)
 
     # collect seed episodes with random action
     for episode in range(args.seed_episodes):
@@ -107,11 +105,13 @@ def main():
             action = env.action_space.sample()
             next_obs, reward, done, _ = env.step(action)
             replay_buffer.push(obs, action, reward, done)
-            obs = next_obs    
+            obs = next_obs
 
     # main training loop
     for episode in range(args.seed_episodes, args.all_episodes):
-        # collect experiences
+        # -----------------------------
+        #      collect experiences
+        # -----------------------------
         start = time.time()
         policy = Agent(encoder, rssm, action_model)
 
@@ -121,7 +121,7 @@ def main():
         while not done:
             action = policy(obs)
             action += np.random.normal(0, np.sqrt(args.action_noise_var),
-                                        env.action_space.shape[0])
+                                       env.action_space.shape[0])
             next_obs, reward, done, _ = env.step(action)
             replay_buffer.push(obs, action, reward, done)
             obs = next_obs
@@ -132,9 +132,12 @@ def main():
               (episode+1, args.all_episodes, total_reward))
         print('elasped time for interaction: %.2fs' % (time.time() - start))
 
-        # update model parameters and value model and action model parameters
+        # update parameters of model, value model, action model
         start = time.time()
         for update_step in range(args.collect_interval):
+            # ---------------------------------------------------------------
+            #      update model (encoder, rssm, obs_model, reward_model)
+            # ---------------------------------------------------------------
             observations, actions, rewards, _ = \
                 replay_buffer.sample(args.batch_size, args.chunk_length)
 
@@ -196,9 +199,14 @@ def main():
             clip_grad_norm_(model_params, args.clip_grad_norm)
             model_optimizer.step()
 
-            # compute target values
+            # ----------------------------------------------
+            #      update value_model and action_model
+            # ----------------------------------------------
+            # detach gradient because Dreamer doesn't update model with actor-critic loss
             flatten_states = flatten_states.detach()
             flatten_rnn_hiddens = flatten_rnn_hiddens.detach()
+
+            # prepare tensor to maintain imaginated trajectory's states and rnn_hiddens
             imaginated_states = torch.zeros(args.imagination_horizon + 1,
                                             *flatten_states.shape,
                                             device=flatten_states.device)
@@ -208,6 +216,7 @@ def main():
             imaginated_states[0] = flatten_states
             imaginated_rnn_hiddens[0] = flatten_rnn_hiddens
 
+            # compute imaginated trajectory using action from action_model
             for h in range(1, args.imagination_horizon + 1):
                 actions = action_model(flatten_states, flatten_rnn_hiddens)
                 flatten_states_prior, flatten_rnn_hiddens = rssm.prior(flatten_states,
@@ -217,6 +226,7 @@ def main():
                 imaginated_states[h] = flatten_states
                 imaginated_rnn_hiddens[h] = flatten_rnn_hiddens
 
+            # compute rewards and values corresponding to imaginated states and rnn_hiddens
             flatten_imaginated_states = imaginated_states.view(-1, args.state_dim)
             flatten_imaginated_rnn_hiddens = imaginated_rnn_hiddens.view(-1, args.rnn_hidden_dim)
             imaginated_rewards = \
@@ -225,38 +235,44 @@ def main():
             imaginated_values = \
                 value_model(flatten_imaginated_states,
                             flatten_imaginated_rnn_hiddens).view(args.imagination_horizon + 1, -1)
-            lambda_value_target = lambda_return(imaginated_rewards, imaginated_values,
-                                                args.gamma, args.lambda_)
-        
+            # compute lambda target
+            lambda_target_values = lambda_target(imaginated_rewards, imaginated_values,
+                                                 args.gamma, args.lambda_)
+
             # update_value model
-            value_loss = 0.5 * mse_loss(imaginated_values, lambda_value_target.detach())
+            value_loss = 0.5 * mse_loss(imaginated_values, lambda_target_values.detach())
             value_optimizer.zero_grad()
             value_loss.backward(retain_graph=True)
             clip_grad_norm_(value_model.parameters(), args.clip_grad_norm)
             value_optimizer.step()
 
-            # update value model and action model
-            action_loss = -1 * (lambda_value_target.mean())
+            # update action model (multiply -1 for gradient ascent)
+            action_loss = -1 * (lambda_target_values.mean())
             action_optimizer.zero_grad()
             action_loss.backward()
             clip_grad_norm_(action_model.parameters(), args.clip_grad_norm)
             action_optimizer.step()
 
-            # print losses and add tensorboard
-            print('update_step: %3d model loss: %.5f, kl_loss: %.5f, obs_loss: %.5f, reward_loss: % .5f, action_loss: %.5f value_loss: %.5f'
-                  % (update_step+1,
-                     model_loss.item(), kl_loss.item(), obs_loss.item(), reward_loss.item(), action_loss.item(), value_loss.item()))
+            # print losses and add to tensorboard
+            print('update_step: %3d model loss: %.5f, kl_loss: %.5f, '
+                  'obs_loss: %.5f, reward_loss: %.5f, '
+                  'value_loss: %.5f action_loss: %.5f'
+                  % (update_step + 1, model_loss.item(), kl_loss.item(),
+                     obs_loss.item(), reward_loss.item(),
+                     value_loss.item(), action_loss.item()))
             total_update_step = episode * args.collect_interval + update_step
             writer.add_scalar('model loss', model_loss.item(), total_update_step)
             writer.add_scalar('kl loss', kl_loss.item(), total_update_step)
             writer.add_scalar('obs loss', obs_loss.item(), total_update_step)
             writer.add_scalar('reward loss', reward_loss.item(), total_update_step)
-            writer.add_scalar('action loss', action_loss.item(), total_update_step)
             writer.add_scalar('value loss', value_loss.item(), total_update_step)
+            writer.add_scalar('action loss', action_loss.item(), total_update_step)
 
         print('elasped time for update: %.2fs' % (time.time() - start))
 
-        # test to get score without exploration noise
+        # ----------------------------------------------
+        #      evaluation without exploration noise
+        # ----------------------------------------------
         if (episode + 1) % args.test_interval == 0:
             policy = Agent(encoder, rssm, action_model)
             start = time.time()
@@ -278,8 +294,8 @@ def main():
     torch.save(rssm.state_dict(), os.path.join(log_dir, 'rssm.pth'))
     torch.save(obs_model.state_dict(), os.path.join(log_dir, 'obs_model.pth'))
     torch.save(reward_model.state_dict(), os.path.join(log_dir, 'reward_model.pth'))
-    torch.save(action_model.state_dict(), os.path.join(log_dir, 'action_model.pth'))
     torch.save(value_model.state_dict(), os.path.join(log_dir, 'value_model.pth'))
+    torch.save(action_model.state_dict(), os.path.join(log_dir, 'action_model.pth'))
     writer.close()
 
 if __name__ == '__main__':
