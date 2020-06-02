@@ -72,7 +72,7 @@ def preprocess_obs(obs):
     return normalized_obs
 
 
-def lambda_return(rewards, values, gamma, lambda_):
+def lambda_target(rewards, values, gamma, lambda_):
     """
     Compute lambda target of value function
     rewards and values should be 2D-tensor and same size,
