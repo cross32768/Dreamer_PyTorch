@@ -52,7 +52,13 @@ def main():
     args = parser.parse_args()
 
     # Prepare logging
-    log_dir = os.path.join(args.log_dir, args.domain_name + '_' + args.task_name)
+    if args.environment == "DMC":
+        log_dir = os.path.join(args.log_dir, args.domain_name + '_' + args.task_name)
+    elif args.environment == "PyBullet":
+        log_dir = os.path.join(args.log_dir, args.env_name)
+    else:
+        raise NotImplementedError
+
     log_dir = os.path.join(log_dir, datetime.now().strftime('%Y%m%d_%H%M'))
     os.makedirs(log_dir)
     with open(os.path.join(log_dir, 'args.json'), 'w') as f:
