@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--log-dir', type=str, default='log')
     parser.add_argument('--test-interval', type=int, default=10)
+    parser.add_argument('--model-save-interval', type=int, default=100)
     parser.add_argument('--environment', type=str, default='DMC', choices=['DMC', 'PyBullet'])
     parser.add_argument('--domain-name', type=str, default='cheetah')
     parser.add_argument('--task-name', type=str, default='run')
@@ -297,13 +298,16 @@ def main():
                   (episode+1, args.all_episodes, total_reward))
             print('elasped time for test: %.2fs' % (time.time() - start))
 
-    # save learned model parameters
-    torch.save(encoder.state_dict(), os.path.join(log_dir, 'encoder.pth'))
-    torch.save(rssm.state_dict(), os.path.join(log_dir, 'rssm.pth'))
-    torch.save(obs_model.state_dict(), os.path.join(log_dir, 'obs_model.pth'))
-    torch.save(reward_model.state_dict(), os.path.join(log_dir, 'reward_model.pth'))
-    torch.save(value_model.state_dict(), os.path.join(log_dir, 'value_model.pth'))
-    torch.save(action_model.state_dict(), os.path.join(log_dir, 'action_model.pth'))
+        if (episode + 1) % args.model_save_interval == 0:
+            # save learned model parameters
+            model_log_dir = os.path.join(log_dir, 'episode_%04d' % (episode + 1))
+            torch.save(encoder.state_dict(), os.path.join(model_log_dir, 'encoder.pth'))
+            torch.save(rssm.state_dict(), os.path.join(model_log_dir, 'rssm.pth'))
+            torch.save(obs_model.state_dict(), os.path.join(model_log_dir, 'obs_model.pth'))
+            torch.save(reward_model.state_dict(), os.path.join(model_log_dir, 'reward_model.pth'))
+            torch.save(value_model.state_dict(), os.path.join(model_log_dir, 'value_model.pth'))
+            torch.save(action_model.state_dict(), os.path.join(model_log_dir, 'action_model.pth'))
+
     writer.close()
 
 if __name__ == '__main__':
