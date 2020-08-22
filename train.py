@@ -4,13 +4,18 @@ import json
 import os
 from pprint import pprint
 import time
+
+import gym
+import pybullet_envs
 import numpy as np
+
 import torch
 from torch.distributions.kl import kl_divergence
 from torch.nn.functional import mse_loss
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
+
 from dm_control import suite
 from dm_control.suite.wrappers import pixels
 from agent import Agent
@@ -76,12 +81,12 @@ def main():
     if args.environment == "DMC":
         env = suite.load(args.domain_name, args.task_name, task_kwargs={'random': args.seed})
         env = pixels.Wrapper(env, render_kwargs={'height': 64,
-                                                'width': 64,
-                                                'camera_id': 0})
+                                                 'width': 64,
+                                                 'camera_id': 0})
         env = GymWrapper_DMC(env)
     elif args.environment == "PyBullet":
         env = gym.make(args.env_name)
-        env = GymWrapper_PyBullet(env)
+        env = GymWrapper_PyBullet(env, cam_dist=2, cam_pitch=0, render_width=64, render_height=64)
     else:
         raise NotImplementedError
     env = RepeatAction(env, skip=args.action_repeat)
@@ -307,6 +312,7 @@ def main():
         if (episode + 1) % args.model_save_interval == 0:
             # save learned model parameters
             model_log_dir = os.path.join(log_dir, 'episode_%04d' % (episode + 1))
+            os.makedirs(model_log_dir)
             torch.save(encoder.state_dict(), os.path.join(model_log_dir, 'encoder.pth'))
             torch.save(rssm.state_dict(), os.path.join(model_log_dir, 'rssm.pth'))
             torch.save(obs_model.state_dict(), os.path.join(model_log_dir, 'obs_model.pth'))

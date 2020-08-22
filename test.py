@@ -6,25 +6,33 @@ from dm_control import suite
 from dm_control.suite.wrappers import pixels
 from agent import Agent
 from model import Encoder, RecurrentStateSpaceModel, ActionModel
-from wrappers import GymWrapper, RepeatAction
+from wrappers import GymWrapper_DMC, GymWrapper_PyBullet, RepeatAction
 
 
 def main():
     parser = argparse.ArgumentParser(description='Test learned model')
     parser.add_argument('dir', type=str, help='log directory to load learned model')
     parser.add_argument('--render', action='store_true')
+    parser.add_argument('--environment', type=str, default='DMC', choices=['DMC', 'PyBullet'])
     parser.add_argument('--domain-name', type=str, default='cheetah')
     parser.add_argument('--task-name', type=str, default='run')
+    parser.add_argument('--env-name', type=str, default='HalfCheetahBulletEnv-v0')
     parser.add_argument('-R', '--action-repeat', type=int, default=2)
     parser.add_argument('--episodes', type=int, default=1)
     args = parser.parse_args()
 
-    # define environment and apply wrapper
-    env = suite.load(args.domain_name, args.task_name)
-    env = pixels.Wrapper(env, render_kwargs={'height': 64,
-                                             'width': 64,
-                                             'camera_id': 0})
-    env = GymWrapper(env)
+    # define env and apply wrappers
+    if args.environment == "DMC":
+        env = suite.load(args.domain_name, args.task_name, task_kwargs={'random': args.seed})
+        env = pixels.Wrapper(env, render_kwargs={'height': 64,
+                                                 'width': 64,
+                                                 'camera_id': 0})
+        env = GymWrapper_DMC(env)
+    elif args.environment == "PyBullet":
+        env = gym.make(args.env_name)
+        env = GymWrapper_PyBullet(env, cam_dist=2, cam_pitch=0, render_width=64, render_height=64)
+    else:
+        raise NotImplementedError
     env = RepeatAction(env, skip=args.action_repeat)
 
     # define models
